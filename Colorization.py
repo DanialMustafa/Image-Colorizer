@@ -11,6 +11,10 @@ from torchvision import transforms
 from PIL import Image
 from skimage import color
 from torchinfo import summary
+import os
+from sklearn.model_selection import train_test_split
+from torch.utils.data import DataLoader, Subset
+from torchvision import transforms
 
 def load_img(img_path):
 	out_np = np.asarray(Image.open(img_path))
@@ -170,14 +174,9 @@ def eccv16(pretrained=True):
 
 class ColorizationDataset(torch.utils.data.Dataset):
     '''Used to train the entire model'''
-    def __init__(self, root_dir, transform=None, max_samples=100):
-        self.root_dir = root_dir
-        self.transform = transform
-        self.image_paths = []
-        for root, dirs, files in os.walk(root_dir):
-            for file in files:
-                if file.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff')):
-                    self.image_paths.append(os.path.join(root, file))
+    def __init__(self, image_paths, transform=None):
+       self.image_paths = image_paths
+       self.transform = transform
 
     def __len__(self):
         return len(self.image_paths)
@@ -199,27 +198,35 @@ class ColorizationDataset(torch.utils.data.Dataset):
 
 transform = transforms.Compose([transforms.Resize((150, 150)), transforms.ToTensor()])
 
-train_dataset = ColorizationDataset(root_dir='drive/MyDrive/dataset (1)', transform=transform)
-val_dataset = ColorizationDataset(root_dir='drive/MyDrive/dataset (1)', transform=transform)
-train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=4)
-val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=4, shuffle=True, num_workers=4)
+# Path to dataset root directory
+root_dir = 'dataset'
+# List all image files in the dataset directory
+all_images = [os.path.join(root_dir, fname) for fname in os.listdir(root_dir)]
+# Split the data into train, validation, and test sets
+train_images, remaining_images = train_test_split(all_images, test_size=0.3)
+val_images, test_images = train_test_split(remaining_images, test_size=0.5)
+# Define any required transformations
+    # Add transformations as per your needs
 
-print("Train Dataset")
-print(len(train_dataset), len(val_dataset))
-print("Train Loader")
-print(len(train_loader), len(val_loader))
+# Create dataset instances for each split using Subset
+train_dataset = ColorizationDataset(train_images, transform=transform)
+val_dataset = ColorizationDataset(val_images, transform=transform)
+test_dataset = ColorizationDataset(test_images, transform=transform)
+# Create DataLoader instances for each split
+train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=4)
+val_loader = DataLoader(val_dataset, batch_size=4, shuffle=True, num_workers=4)
+test_loader = DataLoader(test_dataset, batch_size=4, shuffle=True, num_workers=4)
+# Confirm the sizes of each split
+
+
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 dataloaders = {'train': train_loader, 'val': val_loader}
 dataset_sizes = {'train': len(train_loader.dataset), 'val': len(val_loader.dataset)}
 
-print("Dataset_sizes / Dataloaders")
-print(dataset_sizes)
-print(dataloaders)
 
 def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
     since = time.time()
-
     best_model_wts = copy.deepcopy(model.state_dict())
     best_loss = float('inf')
 
@@ -229,7 +236,7 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
 
     for epoch in range(num_epochs):
         epoch_start_time = time.time()
-        print(f'Epoch {epoch}/{num_epochs - 1}')
+        print(f'Epoch {epoch + 1}/{num_epochs}')
         print('-' * 10)
 
         # Each epoch has a training and validation phase
@@ -240,7 +247,8 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
                 model.train()
             else:
                 model.eval()
-            with tqdm(total=len(dataloaders), desc=f'{phase} Epoch {epoch+1}/{num_epochs}', unit='batch') as pbar:
+
+            with tqdm(total=len(dataloaders[phase]), desc=f'{phase} Epoch {epoch+1}/{num_epochs}', unit='batch') as pbar:
                 for inputs, targets in dataloaders[phase]:
                     inputs = inputs.to(device)
                     targets = targets.to(device)
@@ -249,9 +257,7 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
 
                     with torch.set_grad_enabled(phase == 'train'):
                         outputs = model(inputs)
-
-                        # Compute loss
-                        loss = criterion(outputs, targets)
+                        loss = criterion(outputs, targets) # Compute loss
 
                         if phase == 'train':
                             loss.backward()
@@ -259,27 +265,28 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
 
                     running_loss += loss.item() * inputs.size(0)
 
-                    #Progress bar
+                    # Progress bar
                     pbar.set_postfix({'Loss': loss.item()})
                     pbar.update(1)
+
                 if phase == 'train':
                     scheduler.step()
 
                 epoch_loss = running_loss / dataset_sizes[phase]
-                print(phase, epoch_loss)
 
                 if phase == 'train':
                     train_losses.append(epoch_loss)
                 else:
                     val_losses.append(epoch_loss)
 
-                print(f'{phase} Loss: {epoch_loss:.4f}')
+                print(f'\n{phase} Loss: {epoch_loss:.4f}')
 
                 # Deep copy the model
                 if phase == 'val' and epoch_loss < best_loss:
                     best_loss = epoch_loss
                     best_model_wts = copy.deepcopy(model.state_dict())
                     torch.save(model.state_dict(), 'best_model.pth')
+
             epoch_duration = time.time() - epoch_start_time
             print(f'Epoch {epoch+1} completed in {epoch_duration:.2f} seconds')
             print()
@@ -292,19 +299,110 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
     model.load_state_dict(best_model_wts)
     return model, train_losses, val_losses
 
+def test_model(model, criterion, test_loader):
+    model.eval()  # Set model to evaluation mode
+    test_loss = 0.0
+    with torch.no_grad():  # Disable gradient calculation for testing
+        for inputs, targets in test_loader:
+            inputs = inputs.to(device)
+            targets = targets.to(device)
+
+            # Forward pass
+            outputs = model(inputs)
+
+            # Calculate loss
+            loss = criterion(outputs, targets)
+            test_loss += loss.item() * inputs.size(0)
+
+    # Calculate average test loss
+    test_loss = test_loss / len(test_loader.dataset)
+    print(f'Test Loss: {test_loss:.4f}')
+
+    return test_loss
+
+# Visualize a few test results
+def visualize_colorization(model, test_loader, num_images=5):
+   model.eval()  # Set to evaluation mode
+   plt.figure(figsize=(15, 10))  # Increase figure size for three images in each row
+  
+   for i, (inputs, targets) in enumerate(test_loader):
+       if i >= num_images:
+           break
+       inputs = inputs.to(device)
+      
+       # Forward pass
+       with torch.no_grad():
+           outputs = model(inputs)
+
+
+       # Move data back to CPU for plotting
+       inputs = inputs.cpu()
+       outputs = outputs.cpu()
+       targets = targets.cpu()
+
+
+       # Convert from L and ab channels to RGB
+       for j in range(inputs.size(0)):
+           img_L = inputs[j].cpu().numpy().squeeze() * 100  # Scale L channel to [0, 100]
+           img_ab = outputs[j].cpu().numpy().transpose((1, 2, 0)) * 255 - 128 
+           img_lab = np.concatenate([img_L[:, :, np.newaxis], img_ab], axis=2)
+           img_rgb = color.lab2rgb(img_lab)
+
+
+           # Convert target to RGB for comparison (original color image)
+           target_ab = targets[j].cpu().numpy().transpose((1, 2, 0)) * 255 - 128
+           target_lab = np.concatenate([img_L[:, :, np.newaxis], target_ab], axis=2)
+           target_rgb = color.lab2rgb(target_lab)
+
+
+           # Crop images to 150 x 150
+           img_L = img_L[1:-1, 1:-1]
+           img_rgb = img_rgb[1:-1, 1:-1, :]
+           target_rgb = target_rgb[1:-1, 1:-1, :]
+
+           # Add math parts to compare RGB values and calculate similarity percentage
+           # Compute per-pixel absolute difference
+           diff = np.abs(target_rgb - img_rgb)
+           mean_diff = np.mean(diff)  # Average over all pixels and channels
+
+           # Compute percentage similarity
+           max_diff = 1  # Since RGB values are in [0,1]
+           similarity = (1 - mean_diff / max_diff) * 100  # Percentage similarity
+
+           # Display grayscale input, colorized output, and original color image
+           plt.subplot(num_images, 3, 3 * i + 1)
+           plt.imshow(img_L, cmap='gray')
+           plt.title('Input Grayscale')
+
+
+           plt.subplot(num_images, 3, 3 * i + 2)
+           plt.imshow(img_rgb)
+           plt.title(f'Colorized Output\nSimilarity: {similarity:.2f}%')
+
+
+           plt.subplot(num_images, 3, 3 * i + 3)
+           plt.imshow(target_rgb)
+           plt.title('Original Color Image')
+
+
+   plt.tight_layout()
+   plt.show()
+
+
 if __name__ == '__main__':
+    
     model = eccv16(pretrained=False)
     model = model.to(device)
 
     summary(model, input_size=(4, 1, 150, 150))
 
+    
+    num_epochs = 50
     criterion = torch.nn.MSELoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.001)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
-    num_epochs = 2
-
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+    #Comment out here to test
     model, train_losses, val_losses = train_model(model, criterion, optimizer, scheduler, num_epochs)
-    print(train_losses, val_losses)
 
     # Plot the loss curves
     epochs = range(1, num_epochs+1)
@@ -316,3 +414,14 @@ if __name__ == '__main__':
     plt.ylabel('Loss')
     plt.legend()
     plt.show()
+    #Comment out here to test
+    
+
+    # Load best model weights
+    
+    model.load_state_dict(torch.load('best_model.pth'))
+
+    # Run the test model
+    test_loss = test_model(model, criterion, test_loader)
+    # Visualize colorization results
+    visualize_colorization(model, test_loader, num_images=5)
