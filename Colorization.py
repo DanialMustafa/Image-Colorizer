@@ -369,6 +369,7 @@ def visualize_colorization(model, test_loader, num_images=5):
 
 
 if __name__ == '__main__':
+    
     model = eccv16(pretrained=False)
     model = model.to(device)
     summary(model, input_size=(4, 1, 150, 150))
